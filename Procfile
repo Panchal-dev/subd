@@ -1,0 +1,1 @@
+worker: python subfinder_bot.py

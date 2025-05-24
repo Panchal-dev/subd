@@ -1,0 +1,13 @@
+requests==2.31.0
+beautifulsoup4==4.12.2
+rich==13.7.1
+python-telegram-bot==20.7
+urllib3==2.2.1
+Flask>=2.3.3
+beautifulsoup4>=4.12.3
+pyTelegramBotAPI>=4.14.0
+urllib3>=2.2.3
+requests>=2.31.0
+PySocks>=1.7.1
+psutil>=5.9.8
+gunicorn>=22.0.0
