@@ -318,7 +318,7 @@ class SubFinder:
 
             self.console.print_final_summary(output_file)
             await update.message.reply_text(
-                f"Total: {self.total_subdomains} subdomains found\nResults saved to {output_file}"
+                f"Total: {self.console.total_subdomains} subdomains found\nResults saved to {output_file}"
             )
             # Send the output file to the user
             if os.path.exists(output_file):
