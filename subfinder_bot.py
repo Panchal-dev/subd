@@ -398,6 +398,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if user is authorized (optional, configurable via environment variable)
+    allowed_users = os.getenv("ALLOWED_USERS", "").split(",")
+    chat_id = str(update.effective_chat.id)
+    if allowed_users and allowed_users != [''] and chat_id not in allowed_users:
+        await update.message.reply_text("❌ Restricted to specific users.", reply_to_message_id=update.message.message_id)
+        return
+
     subfinder = SubFinder()
     sources = get_sources()
     domains = []
@@ -411,6 +418,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not file_path.endswith('.txt'):
                 await update.message.reply_text("Please upload a .txt file with one domain per line.")
+                os.remove(file_path)
                 return
 
             file_size = os.path.getsize(file_path)
@@ -448,7 +456,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.process_update(update)
+        if update:
+            await application.process_update(update)
         return {"ok": True}
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
@@ -460,16 +469,17 @@ def health():
 
 def set_webhook():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    webhook_url = os.getenv("WEBHOOK_URL", "https://web-production-f764.up.railway.app/telegram")
-    if not bot_token:
-        logger.error("TELEGRAM_BOT_TOKEN not set")
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if not bot_token or not webhook_url:
+        logger.error("TELEGRAM_BOT_TOKEN or WEBHOOK_URL not set")
         return
     try:
         response = requests.get(
-            f"https://api.telegram.org/bot{bot_token}/setWebhook?url={webhook_url}"
+            f"https://api.telegram.org/bot{bot_token}/setWebhook?url={webhook_url}",
+            timeout=10
         )
         if response.status_code == 200:
-            logger.info(f"Webhook reset to: {webhook_url}")
+            logger.info(f"Webhook set to: {webhook_url}")
         else:
             logger.error(f"Failed to set webhook: {response.text}")
     except Exception as e:
