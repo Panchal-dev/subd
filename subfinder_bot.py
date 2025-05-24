@@ -396,6 +396,9 @@ class SubFinder:
 # Flask app for webhook
 app = Flask(__name__)
 
+# Global application variable, initialized later
+application = None
+
 # Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -471,14 +474,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Flask route for webhook
 @app.route('/telegram', methods=['POST'])
 async def webhook():
+    global application
+    if application is None:
+        logger.error("Application not initialized")
+        return {"error": "Application not initialized"}, 500
+
     try:
         data = request.get_json(force=True)
         if not data:
             logger.error("No JSON data received in webhook")
             return {"error": "No JSON data"}, 400
+        logger.info(f"Received webhook data: {data}")
         update = Update.de_json(data, application.bot)
         if update:
             await application.process_update(update)
+        else:
+            logger.error("Failed to parse update from webhook data")
+            return {"error": "Invalid update data"}, 400
         return {"ok": True}
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
@@ -513,9 +525,12 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set")
         return
 
-    # Initialize the bot
+    # Initialize the bot application
     application = Application.builder().token(bot_token).build()
-
+    
+    # Explicitly initialize the application
+    application.initialize()
+    
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
