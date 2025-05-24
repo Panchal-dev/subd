@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup
 from rich.console import Console
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -17,6 +18,15 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+import logging
+import json
+
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # HTTP headers and user agents for requests
 HEADERS = {
@@ -75,8 +85,8 @@ class RequestHandler:
             response = self.session.get(url, timeout=timeout, headers=self._get_headers())
             if response.status_code == 200:
                 return response
-        except requests.RequestException:
-            pass
+        except requests.RequestException as e:
+            logger.error(f"Request failed for {url}: {str(e)}")
         return None
 
     def __enter__(self):
@@ -256,14 +266,52 @@ class SubFinder:
         try:
             found = source.fetch(domain)
             return DomainValidator.filter_valid_subdomains(found, domain)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error fetching from {source.name} for {domain}: {str(e)}")
             return set()
 
     @staticmethod
-    def save_subdomains(subdomains, output_file):
-        if subdomains:
-            with open(output_file, "a", encoding="utf-8") as f:
-                f.write("\n".join(sorted(subdomains)) + "\n")
+    def save_subdomains(subdomains, output_file, max_file_size=50*1024*1024):  # 50MB
+        if not subdomains:
+            return []
+
+        output_files = []
+        current_file = output_file
+        part_number = 1
+        current_size = 0
+        current_subdomains = []
+
+        # Check if base file already exists and determine next part number
+        if os.path.exists(output_file):
+            base, ext = os.path.splitext(output_file)
+            while os.path.exists(current_file):
+                part_number += 1
+                current_file = f"{base}_part{part_number}{ext}"
+        output_files.append(current_file)
+
+        for sub in sorted(subdomains):
+            line = sub + "\n"
+            line_size = len(line.encode('utf-8'))
+            if current_size + line_size > max_file_size:
+                # Write current batch to file
+                with open(current_file, "a", encoding="utf-8") as f:
+                    f.write("".join(current_subdomains))
+                current_subdomains = [line]
+                current_size = line_size
+                part_number += 1
+                base, ext = os.path.splitext(output_file)
+                current_file = f"{base}_part{part_number}{ext}"
+                output_files.append(current_file)
+            else:
+                current_subdomains.append(line)
+                current_size += line_size
+
+        # Write remaining subdomains
+        if current_subdomains:
+            with open(current_file, "a", encoding="utf-8") as f:
+                f.write("".join(current_subdomains))
+
+        return output_files
 
     def process_domain(self, domain, output_file, sources, total):
         if not DomainValidator.is_valid_domain(domain):
@@ -299,32 +347,49 @@ class SubFinder:
         self.completed = 0
         all_subdomains = set()
         total = len(domains)
+        batch_size = 100  # Process domains in batches to manage memory
 
         with self.cursor_manager:
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [
-                    executor.submit(self.process_domain, domain, output_file, sources, total)
-                    for domain in domains
-                ]
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                        all_subdomains.update(result)
-                        # Send progress update to Telegram
-                        progress_message = f"Progress: {self.completed}/{total}"
-                        await update.message.reply_text(progress_message)
-                    except Exception as e:
-                        await update.message.reply_text(f"Error processing domain: {str(e)}")
+            for i in range(0, total, batch_size):
+                batch = domains[i:i + batch_size]
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = [
+                        executor.submit(self.process_domain, domain, output_file, sources, total)
+                        for domain in batch
+                    ]
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                            all_subdomains.update(result)
+                            # Send progress update to Telegram
+                            progress_message = f"Progress: {self.completed}/{total}"
+                            await update.message.reply_text(progress_message)
+                        except Exception as e:
+                            logger.error(f"Error processing domain: {str(e)}")
+                            await update.message.reply_text(f"Error processing domain: {str(e)}")
 
             self.console.print_final_summary(output_file)
             await update.message.reply_text(
                 f"Total: {self.console.total_subdomains} subdomains found\nResults saved to {output_file}"
             )
-            # Send the output file to the user
-            if os.path.exists(output_file):
-                with open(output_file, 'rb') as f:
-                    await update.message.reply_document(document=f, filename=os.path.basename(output_file))
+            # Send output files to the user
+            output_files = self.save_subdomains(all_subdomains, output_file)
+            for file in output_files:
+                if os.path.exists(file):
+                    file_size = os.path.getsize(file)
+                    if file_size > 50 * 1024 * 1024:  # 50MB
+                        await update.message.reply_text(f"File {file} exceeds 50MB and cannot be sent via Telegram.")
+                        continue
+                    with open(file, 'rb') as f:
+                        try:
+                            await update.message.reply_document(document=f, filename=os.path.basename(file))
+                        except Exception as e:
+                            logger.error(f"Failed to send file {file}: {str(e)}")
+                            await update.message.reply_text(f"Failed to send file {file}: {str(e)}")
             return all_subdomains
+
+# Flask app for webhook
+app = Flask(__name__)
 
 # Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,38 +402,84 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = get_sources()
     domains = []
 
-    if update.message.document:
-        # Handle file input
-        file = await update.message.document.get_file()
-        file_path = os.path.join(tempfile.gettempdir(), update.message.document.file_name)
-        await file.download_to_drive(file_path)
-        
-        if not file_path.endswith('.txt'):
-            await update.message.reply_text("Please upload a .txt file with one domain per line.")
+    try:
+        if update.message.document:
+            # Handle file input
+            file = await update.message.document.get_file()
+            file_path = os.path.join(tempfile.gettempdir(), update.message.document.file_name)
+            await file.download_to_drive(file_path)
+            
+            if not file_path.endswith('.txt'):
+                await update.message.reply_text("Please upload a .txt file with one domain per line.")
+                return
+
+            file_size = os.path.getsize(file_path)
+            if file_size > 100 * 1024 * 1024:  # 100MB limit
+                await update.message.reply_text("Input file exceeds 100MB. Please use a smaller file.")
+                os.remove(file_path)
+                return
+
+            with open(file_path, 'r') as f:
+                domains = [d.strip() for d in f if DomainValidator.is_valid_domain(d.strip())]
+            output_file = f"{file_path.rsplit('.', 1)[0]}_subdomains.txt"
+            os.remove(file_path)  # Clean up temporary file
+        else:
+            # Handle text message input
+            text = update.message.text
+            domains = [d.strip() for d in text.splitlines() if DomainValidator.is_valid_domain(d.strip())]
+            output_file = "subdomains.txt" if domains else "subdomains.txt"
+
+        if not domains:
+            await update.message.reply_text("No valid domains provided.")
             return
 
-        with open(file_path, 'r') as f:
-            domains = [d.strip() for d in f if DomainValidator.is_valid_domain(d.strip())]
-        output_file = f"{file_path.rsplit('.', 1)[0]}_subdomains.txt"
-        os.remove(file_path)  # Clean up temporary file
-    else:
-        # Handle text message input
-        text = update.message.text
-        domains = [d.strip() for d in text.splitlines() if DomainValidator.is_valid_domain(d.strip())]
-        output_file = "subdomains.txt" if domains else "subdomains.txt"
+        if len(domains) > 1000:
+            await update.message.reply_text("Too many domains (max 1000). Please reduce the number of domains.")
+            return
 
-    if not domains:
-        await update.message.reply_text("No valid domains provided.")
+        await update.message.reply_text(f"Processing {len(domains)} domain(s)...")
+        await subfinder.run(domains, output_file, sources, update, context)
+    except Exception as e:
+        logger.error(f"Error in handle_message: {str(e)}")
+        await update.message.reply_text(f"An error occurred: {str(e)}")
+
+# Flask route for webhook
+@app.route('/telegram', methods=['POST'])
+async def webhook():
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        return {"error": str(e)}, 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    return {"status": "healthy"}, 200
+
+def set_webhook():
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    webhook_url = os.getenv("WEBHOOK_URL", "https://web-production-f764.up.railway.app/telegram")
+    if not bot_token:
+        logger.error("TELEGRAM_BOT_TOKEN not set")
         return
-
-    await update.message.reply_text(f"Processing {len(domains)} domain(s)...")
-    await subfinder.run(domains, output_file, sources, update, context)
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{bot_token}/setWebhook?url={webhook_url}"
+        )
+        if response.status_code == 200:
+            logger.info(f"Webhook reset to: {webhook_url}")
+        else:
+            logger.error(f"Failed to set webhook: {response.text}")
+    except Exception as e:
+        logger.error(f"Error setting webhook: {str(e)}")
 
 def main():
-    # Get Telegram bot token from environment variable
+    global application
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not bot_token:
-        print("Error: TELEGRAM_BOT_TOKEN environment variable not set")
+        logger.error("TELEGRAM_BOT_TOKEN environment variable not set")
         return
 
     # Initialize the bot
@@ -379,9 +490,13 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_message))
 
-    # Start the bot
-    print("Bot is running...")
-    application.run_polling()
+    # Set webhook
+    set_webhook()
+
+    # Start Flask server
+    port = int(os.getenv("PORT", 8080))
+    logger.info("Bot is running...")
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == '__main__':
     main()
