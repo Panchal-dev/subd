@@ -369,9 +369,14 @@ class SubFinder:
                             await update.message.reply_text(f"Error processing domain: {str(e)}")
 
             self.console.print_final_summary(output_file)
-            await update.message.reply_text(
-                f"Total: {self.console.total_subdomains} subdomains found\nResults saved to {output_file}"
-            )
+            try:
+                await update.message.reply_text(
+                    f"Total: {self.console.total_subdomains} subdomains found\nResults saved to {output_file}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send final message: {str(e)}")
+                return
+
             # Send output files to the user
             output_files = self.save_subdomains(all_subdomains, output_file)
             for file in output_files:
@@ -393,16 +398,25 @@ app = Flask(__name__)
 
 # Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Welcome to SubFinder Bot! Send a .txt file with one domain per line or a text message with domains (one per line)."
-    )
+    try:
+        await update.message.reply_text(
+            "Welcome to SubFinder Bot! Send a .txt file with one domain per line or a text message with domains (one per line)."
+        )
+    except Exception as e:
+        logger.error(f"Failed to send start message: {str(e)}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if user is authorized (optional, configurable via environment variable)
     allowed_users = os.getenv("ALLOWED_USERS", "").split(",")
     chat_id = str(update.effective_chat.id)
     if allowed_users and allowed_users != [''] and chat_id not in allowed_users:
-        await update.message.reply_text("❌ Restricted to specific users.", reply_to_message_id=update.message.message_id)
+        try:
+            await update.message.reply_text(
+                "❌ Restricted to specific users.", 
+                reply_to_message_id=update.message.message_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to send restricted message: {str(e)}")
         return
 
     subfinder = SubFinder()
@@ -449,13 +463,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await subfinder.run(domains, output_file, sources, update, context)
     except Exception as e:
         logger.error(f"Error in handle_message: {str(e)}")
-        await update.message.reply_text(f"An error occurred: {str(e)}")
+        try:
+            await update.message.reply_text(f"An error occurred: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to send error message: {str(e)}")
 
 # Flask route for webhook
 @app.route('/telegram', methods=['POST'])
 async def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
+        data = request.get_json(force=True)
+        if not data:
+            logger.error("No JSON data received in webhook")
+            return {"error": "No JSON data"}, 400
+        update = Update.de_json(data, application.bot)
         if update:
             await application.process_update(update)
         return {"ok": True}

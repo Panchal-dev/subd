@@ -3,5 +3,5 @@ beautifulsoup4==4.12.2
 rich==13.7.1
 python-telegram-bot==20.7
 urllib3==2.2.1
-pyTelegramBotAPI>=4.14.0
 flask==2.3.2
+asgiref==3.8.1
