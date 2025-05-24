@@ -21,14 +21,14 @@ from telegram.ext import (
 import logging
 import json
 
-# Configure logging
+# Configure logging for detailed debugging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# HTTP headers and user agents for requests
+# HTTP headers and user agents for subdomain source requests
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
@@ -68,7 +68,7 @@ class SubFinderConsole(Console):
     def print_error(self, message):
         self.print(f"[red]{message}[/red]")
 
-# Request handler for HTTP requests
+# Request handler for HTTP requests to subdomain sources
 class RequestHandler:
     def __init__(self):
         self.session = requests.Session()
@@ -125,7 +125,7 @@ class DomainValidator:
                 result.add(sub)
         return result
 
-# Cursor manager for hiding/showing cursor
+# Cursor manager for hiding/showing cursor in console
 class CursorManager:
     def __enter__(self):
         print('\033[?25l', end='', flush=True)
